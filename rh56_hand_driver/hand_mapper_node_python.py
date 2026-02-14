@@ -15,152 +15,142 @@ class HandMapperNode(Node):
     def __init__(self):
         super().__init__('hand_mapper_node')
 
-        self.get_logger().info("=== Initializing RH56 Hand Driver ===")
+        self.get_logger().info("=== RH56 PRO Teleoperation ===")
 
-        # ================= DDS INIT =================
+        # DDS INIT
         if len(sys.argv) > 1:
             ChannelFactoryInitialize(0, sys.argv[1])
         else:
             ChannelFactoryInitialize(0)
 
-        self.pub_r = ChannelPublisher(
+        self.pub = ChannelPublisher(
             "rt/inspire_hand/ctrl/l",
             inspire_dds.inspire_hand_ctrl
         )
-        self.pub_r.Init()
+        self.pub.Init()
 
         self.cmd = inspire_hand_defaut.get_inspire_hand_ctrl()
 
-        self.get_logger().info("DDS Channel initialized")
-
-        # ============ OPEN HAND AT START ============
         self.open_hand()
 
-        # ================= ROS SUB ==================
+        # ROS SUB
         self.subscription = self.create_subscription(
             HandLandmarks,
             '/hand_landmarks',
-            self.landmarks_callback,
+            self.callback,
             qos_profile_sensor_data
         )
 
+        # Teleop state
+        self.min_val = np.full(5, np.inf)
+        self.max_val = np.zeros(5)
+
+        self.filtered = np.zeros(5)
+        self.alpha = 0.25
+        self.deadband = 0.015
+
         self.debug_counter = 0
-        self.debug_every_n = 10
 
-        self.get_logger().info("Subscribed to /hand_landmarks")
-        self.get_logger().info("=== RH56 READY ===")
+        self.get_logger().info("=== READY ===")
 
-    # =========================================================
+    # -----------------------------------------------------
 
     def open_hand(self):
-        """Apre completamente la mano robotica"""
-        self.cmd.angle_set = [0, 0, 0, 0, 0, 0]
+        self.cmd.angle_set = [0]*6
         self.cmd.mode = 0b0001
-
-        self.get_logger().info("Opening hand...")
-
         for _ in range(5):
-            self.pub_r.Write(self.cmd)
+            self.pub.Write(self.cmd)
             time.sleep(0.05)
 
-        self.get_logger().info("Hand fully opened.")
+    # -----------------------------------------------------
 
-    # =========================================================
+    def normalize_dynamic(self, value, idx):
 
-    def normalize(self, value, min_val, max_val):
-        norm = (value - min_val) / (max_val - min_val)
-        return np.clip(norm, 0.0, 1.0)
+        self.min_val[idx] = min(self.min_val[idx], value)
+        self.max_val[idx] = max(self.max_val[idx], value)
 
-    def to_servo(self, close_norm):
-        """
-        close_norm:
-            0 → dito aperto
-            1 → dito chiuso
-        output:
-            0 → aperto
-            1000 → chiuso
-        """
-        return int(np.clip(close_norm, 0.0, 1.0) * 1000)
+        if self.max_val[idx] - self.min_val[idx] < 1e-4:
+            return 0.0
 
-    # =========================================================
+        norm = (value - self.min_val[idx]) / (
+            self.max_val[idx] - self.min_val[idx]
+        )
 
-    def landmarks_callback(self, msg):
+        return np.clip(1 - norm, 0.0, 1.0)
+
+    # -----------------------------------------------------
+
+    def low_pass(self, new, idx):
+
+        filtered = self.alpha * new + (1 - self.alpha) * self.filtered[idx]
+
+        if abs(filtered - self.filtered[idx]) < self.deadband:
+            return self.filtered[idx]
+
+        self.filtered[idx] = filtered
+        return filtered
+
+    # -----------------------------------------------------
+
+    def callback(self, msg):
 
         if msg.hand_id != "Left":
             return
 
         if len(msg.landmarks) != 21:
-            self.get_logger().warn("Invalid landmark size")
             return
 
-        self.debug_counter += 1
-
-        def get_tip(idx):
+        def p(i):
             return np.array([
-                msg.landmarks[idx].position.x,
-                msg.landmarks[idx].position.y,
-                msg.landmarks[idx].position.z
+                msg.landmarks[i].position.x,
+                msg.landmarks[i].position.y,
+                msg.landmarks[i].position.z
             ])
 
-        wrist = get_tip(0)
+        wrist = p(0)
+        middle_mcp = p(9)
 
-        # ===== Distances (thumb → pinky) =====
-        thumb_dist  = np.linalg.norm(get_tip(4)  - wrist)
-        index_dist  = np.linalg.norm(get_tip(8)  - wrist)
-        middle_dist = np.linalg.norm(get_tip(12) - wrist)
-        ring_dist   = np.linalg.norm(get_tip(16) - wrist)
-        pinky_dist  = np.linalg.norm(get_tip(20) - wrist)
+        # Scala mano (compensazione prospettiva)
+        hand_scale = np.linalg.norm(middle_mcp - wrist)
 
-        # ===== Normalize → 0=open, 1=closed =====
-        thumb_close  = 1.0 - self.normalize(thumb_dist, 0.05, 0.20)
-        index_close  = 1.0 - self.normalize(index_dist, 0.05, 0.25)
-        middle_close = 1.0 - self.normalize(middle_dist, 0.05, 0.25)
-        ring_close   = 1.0 - self.normalize(ring_dist, 0.05, 0.25)
-        pinky_close  = 1.0 - self.normalize(pinky_dist, 0.05, 0.25)
+        if hand_scale < 1e-6:
+            return
 
-        # ===== Convert to servo =====
-        # IMPORTANTE: robot order = pinky → thumb
-        angles = [
-            self.to_servo(pinky_close),
-            self.to_servo(ring_close),
-            self.to_servo(middle_close),
-            self.to_servo(index_close),
-            self.to_servo(thumb_close),
-            self.to_servo(thumb_close)  # opposizione
+        tips = [4, 8, 12, 16, 20]  # thumb → pinky
+        closes = []
+
+        for i, tip_idx in enumerate(tips):
+
+            rel_dist = np.linalg.norm(p(tip_idx) - wrist) / hand_scale
+
+            norm = self.normalize_dynamic(rel_dist, i)
+            smooth = self.low_pass(norm, i)
+
+            closes.append(smooth)
+
+        # Robot order: pinky → thumb
+        servo = [
+            int(closes[4]*1000),
+            int(closes[3]*1000),
+            int(closes[2]*1000),
+            int(closes[1]*1000),
+            int(closes[0]*1000),
+            int(closes[0]*1000)
         ]
 
-        # Per proteggere i giunti
-        angles = np.clip(angles, 10, 990).tolist()
-
-        self.cmd.angle_set = angles
+        self.cmd.angle_set = servo
         self.cmd.mode = 0b0001
 
-        # ================= DEBUG =================
-        if self.debug_counter % self.debug_every_n == 0:
+        self.pub.Write(self.cmd)
 
-            self.get_logger().info("----- HAND DEBUG -----")
-            self.get_logger().info(
-                f"Distances  T:{thumb_dist:.3f} "
-                f"I:{index_dist:.3f} "
-                f"M:{middle_dist:.3f} "
-                f"R:{ring_dist:.3f} "
-                f"P:{pinky_dist:.3f}"
-            )
-            self.get_logger().info(
-                f"CloseNorm  T:{thumb_close:.2f} "
-                f"I:{index_close:.2f} "
-                f"M:{middle_close:.2f} "
-                f"R:{ring_close:.2f} "
-                f"P:{pinky_close:.2f}"
-            )
-            self.get_logger().info(f"[TX] Servo angles: {angles}")
-            self.get_logger().info("----------------------")
+        # DEBUG
+        self.debug_counter += 1
+        if self.debug_counter % 20 == 0:
+            self.get_logger().info(f"Servo: {servo}")
+            self.get_logger().info(f"Filtered close: {np.round(closes,2)}")
 
-        # =============== SEND DDS ===============
-        if not self.pub_r.Write(self.cmd):
-            self.get_logger().warn("Waiting for DDS subscriber...")
 
-# =========================================================
+# -----------------------------------------------------
 
 def main(args=None):
     rclpy.init(args=args)
