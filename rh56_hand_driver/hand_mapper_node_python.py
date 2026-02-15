@@ -231,6 +231,8 @@ class HandMapperNode(Node):
         robot_angles = self.low_pass_filter(robot_angles)
         robot_angles = self.apply_deadband(robot_angles)
 
+        robot_angles = np.clip(robot_angles, 50, 950)
+
         self.cmd.angle_set = robot_angles.astype(int).tolist()
         self.cmd.mode = 0b0001
 
@@ -240,7 +242,7 @@ class HandMapperNode(Node):
         self.debug_counter += 1
         if self.debug_counter % self.debug_every_n == 0:
             self.get_logger().info("----- DEBUG -----")
-            self.get_logger().info(f"Norm values: {norm_values}")
+            self.get_logger().info(f"Norm values: {np.round(norm_values, 2)}")
             self.get_logger().info(f"Mapped angles: {robot_angles}")
             self.get_logger().info("-----------------")
 
