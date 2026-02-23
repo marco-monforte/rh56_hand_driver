@@ -4,6 +4,8 @@ from rclpy.qos import qos_profile_sensor_data
 from hand_msgs.msg import HandLandmarks
 import numpy as np
 import time
+import os
+import yaml
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
 from inspire_sdkpy import inspire_hand_defaut, inspire_dds
@@ -30,7 +32,6 @@ class HandMapperNode(Node):
         self.pub.Init()
 
         self.cmd = inspire_hand_defaut.get_inspire_hand_ctrl()
-
         self.cmd.angle_set = [0, 0, 0, 0, 0, 0]
         self.cmd.mode = 0b0001
         self.pub.Write(self.cmd)
@@ -53,20 +54,22 @@ class HandMapperNode(Node):
 
         self.open_ref = None
         self.close_ref = None
-        self.opp_ref = None
+        self.opposition_min = None
+        self.opposition_max = None
+
+        self.calib_file = os.path.expanduser("~/.rh56_hand_calibration.yaml")
 
         self.debug_counter = 0
         self.debug_every_n = 10
 
-        if self.calibration_enabled:
+        if self.calibration_enabled or not os.path.exists(self.calib_file):
             self.run_calibration()
+        else:
+            self.load_calibration()
 
         self.get_logger().info("=== RH56 Hand Driver READY ===")
 
-    # =========================================================
-    # Utility
-    # =========================================================
-
+    # ================= UTILITY =================
     def low_pass_filter(self, target):
         self.filtered_angles = (
             self.alpha * target + (1 - self.alpha) * self.filtered_angles
@@ -91,10 +94,7 @@ class HandMapperNode(Node):
         bar = "[" + "#" * bars + "-" * (20 - bars) + "]"
         print(f"\r{bar} {percent*100:5.1f}% ", end="")
 
-    # =========================================================
-    # Calibration
-    # =========================================================
-
+    # ================= CALIBRATION =================
     def run_calibration(self):
 
         self.get_logger().warn("=== CALIBRATION MODE ===")
@@ -102,52 +102,68 @@ class HandMapperNode(Node):
         # -------- OPEN HAND --------
         self.get_logger().warn("Keep hand OPEN")
         input("Press ENTER to start OPEN acquisition (5s)...")
-
         self.open_close_data = []
-        start = time.time()
-        while time.time() - start < 5.0:
-            self.progress_bar(time.time() - start, 5.0)
-            rclpy.spin_once(self, timeout_sec=0.01)
-        print()
-
-        self.open_ref = np.mean(self.open_close_data, axis=0)
-        self.get_logger().info(f"OPEN reference: {np.round(self.open_ref,3)}")
-
-        # -------- CLOSED HAND --------
-        self.get_logger().warn("Keep hand CLOSED")
-        input("Press ENTER to start CLOSED acquisition (5s)...")
-
-        self.open_close_data = []
-        start = time.time()
-        while time.time() - start < 5.0:
-            self.progress_bar(time.time() - start, 5.0)
-            rclpy.spin_once(self, timeout_sec=0.01)
-        print()
-
-        self.close_ref = np.mean(self.open_close_data, axis=0)
-        self.get_logger().info(f"CLOSE reference: {np.round(self.close_ref,3)}")
-
-        # -------- THUMB OPPOSITION --------
-        self.get_logger().warn("Move thumb in MAXIMUM OPPOSITION")
-        input("Press ENTER to start OPPOSITION acquisition (5s)...")
-
         self.opposition_data = []
         start = time.time()
         while time.time() - start < 5.0:
             self.progress_bar(time.time() - start, 5.0)
             rclpy.spin_once(self, timeout_sec=0.01)
         print()
+        self.open_ref = np.mean(self.open_close_data, axis=0)
+        self.opposition_min = np.mean(self.opposition_data)
+        self.get_logger().info(f"OPEN reference: {np.round(self.open_ref,3)}")
+        self.get_logger().info(f"Opposition min (open hand): {self.opposition_min:.4f}")
 
-        self.opp_ref = np.mean(self.opposition_data)
-        self.get_logger().info(f"OPPOSITION reference: {self.opp_ref:.4f}")
+        # -------- CLOSED HAND --------
+        self.get_logger().warn("Keep hand CLOSED")
+        input("Press ENTER to start CLOSED acquisition (5s)...")
+        self.open_close_data = []
+        self.opposition_data = []
+        start = time.time()
+        while time.time() - start < 5.0:
+            self.progress_bar(time.time() - start, 5.0)
+            rclpy.spin_once(self, timeout_sec=0.01)
+        print()
+        self.close_ref = np.mean(self.open_close_data, axis=0)
+        self.get_logger().info(f"CLOSE reference: {np.round(self.close_ref,3)}")
 
-        self.get_logger().info("=== CALIBRATION COMPLETE ===")
+        # -------- THUMB MAX OPPOSITION --------
+        self.get_logger().warn("Move thumb in MAXIMUM OPPOSITION")
+        input("Press ENTER to start OPPOSITION acquisition (5s)...")
+        self.opposition_data = []
+        start = time.time()
+        while time.time() - start < 5.0:
+            self.progress_bar(time.time() - start, 5.0)
+            rclpy.spin_once(self, timeout_sec=0.01)
+        print()
+        self.opposition_max = np.mean(self.opposition_data)
+        self.get_logger().info(f"Opposition max (thumb max): {self.opposition_max:.4f}")
+
+        self.save_calibration()
         self.calibration_enabled = False
+        self.get_logger().info("=== CALIBRATION COMPLETE ===")
 
-    # =========================================================
-    # Main Callback
-    # =========================================================
+    def save_calibration(self):
+        data = {
+            "open_ref": self.open_ref.tolist(),
+            "close_ref": self.close_ref.tolist(),
+            "opposition_min": float(self.opposition_min),
+            "opposition_max": float(self.opposition_max)
+        }
+        with open(self.calib_file, "w") as f:
+            yaml.dump(data, f)
+        self.get_logger().info(f"Calibration saved to {self.calib_file}")
 
+    def load_calibration(self):
+        with open(self.calib_file, "r") as f:
+            data = yaml.safe_load(f)
+        self.open_ref = np.array(data["open_ref"])
+        self.close_ref = np.array(data["close_ref"])
+        self.opposition_min = data["opposition_min"]
+        self.opposition_max = data["opposition_max"]
+        self.get_logger().info("Calibration loaded from file")
+
+    # ================= CALLBACK =================
     def landmarks_callback(self, msg):
 
         if len(msg.landmarks) != 21:
@@ -185,38 +201,31 @@ class HandMapperNode(Node):
         )
 
         # ================= THUMB OPPOSITION =================
-        opposition = np.linalg.norm(get_pt(4) - get_pt(17)) / palm_size
+        thumb_tip = get_pt(4)
+        middle_mcp = get_pt(9)
+        dist = np.linalg.norm(thumb_tip - middle_mcp)
 
-        # ================= CALIBRATION DATA COLLECTION =================
         if self.calibration_enabled:
-
-            self.open_close_data.append(
-                np.array([index, middle, ring, pinky, angle])
-            )
-
-            self.opposition_data.append(opposition)
+            # raccolta raw durante calibrazione
+            self.open_close_data.append(np.array([index, middle, ring, pinky, angle]))
+            self.opposition_data.append(dist)
             return
-
-        # ================= NORMALIZATION =================
-        fingers_raw = np.array([index, middle, ring, pinky, angle])
-
-        if self.open_ref is not None and self.close_ref is not None:
-
-            fingers_norm = self.normalize(
-                fingers_raw,
-                self.open_ref,
-                self.close_ref
+        else:
+            # normalizzazione tra min e max calibrazione
+            opposition = np.clip(
+                (dist - self.opposition_min) / (self.opposition_max - self.opposition_min),
+                0.0, 1.0
             )
-
+            
+        # ================= NORMALIZZAZIONE DITA =================
+        fingers_raw = np.array([index, middle, ring, pinky, angle])
+        if self.open_ref is not None and self.close_ref is not None:
+            fingers_norm = self.normalize(fingers_raw, self.open_ref, self.close_ref)
         else:
             fingers_norm = np.clip(fingers_raw, 0, 1)
 
         thumb_flex = fingers_norm[4]
-
-        if self.opp_ref is not None:
-            thumb_opp = np.clip(opposition / self.opp_ref, 0, 1)
-        else:
-            thumb_opp = np.clip(opposition, 0, 1)
+        thumb_opp = np.clip(opposition, 0, 1)
 
         # ================= SCALE =================
         angles = fingers_norm[:4] * 1000.0
@@ -243,17 +252,10 @@ class HandMapperNode(Node):
         # ================= DEBUG =================
         self.debug_counter += 1
         if self.debug_counter % self.debug_every_n == 0:
-
             self.get_logger().info("----- DEBUG -----")
-            self.get_logger().info(
-                f"Fingers norm: {np.round(fingers_norm,2).tolist()}"
-            )
-            self.get_logger().info(
-                f"Thumb flex: {thumb_flex:.2f} | Thumb opp: {thumb_opp:.2f}"
-            )
-            self.get_logger().info(
-                f"Robot angles: {np.round(robot_angles,2).tolist()}"
-            )
+            self.get_logger().info(f"Fingers norm: {np.round(fingers_norm,2).tolist()}")
+            self.get_logger().info(f"Thumb flex: {thumb_flex:.2f} | Thumb opp: {thumb_opp:.2f}")
+            self.get_logger().info(f"Robot angles: {np.round(robot_angles,2).tolist()}")
             self.get_logger().info("-----------------")
 
 
