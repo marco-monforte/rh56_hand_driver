@@ -32,7 +32,7 @@ class HandMapperNode(Node):
         self.pub.Init()
 
         self.cmd = inspire_hand_defaut.get_inspire_hand_ctrl()
-        self.cmd.angle_set = [0, 0, 0, 0, 0, 0]
+        self.cmd.angle_set = [1000, 1000, 1000, 1000, 1000, 1000]
         self.cmd.mode = 0b0001
         self.pub.Write(self.cmd)
 
@@ -220,12 +220,12 @@ class HandMapperNode(Node):
         # ================= NORMALIZZAZIONE DITA =================
         fingers_raw = np.array([index, middle, ring, pinky, angle])
         if self.open_ref is not None and self.close_ref is not None:
-            fingers_norm = self.normalize(fingers_raw, self.open_ref, self.close_ref)
+            fingers_norm = self.normalize(fingers_raw, self.close_ref, self.open_ref)
         else:
             fingers_norm = np.clip(fingers_raw, 0, 1)
 
         thumb_flex = fingers_norm[4]
-        thumb_opp = np.clip(opposition, 0, 1)
+        thumb_opp = 1 - np.clip(opposition, 0, 1)
 
         # ================= SCALE =================
         angles = fingers_norm[:4] * 1000.0
@@ -243,7 +243,7 @@ class HandMapperNode(Node):
 
         robot_angles = self.low_pass_filter(robot_angles)
         robot_angles = self.apply_deadband(robot_angles)
-        robot_angles = np.clip(robot_angles, 50, 950)
+        robot_angles = np.clip(robot_angles, 20, 980)
 
         self.cmd.angle_set = robot_angles.astype(int).tolist()
         self.cmd.mode = 0b0001
