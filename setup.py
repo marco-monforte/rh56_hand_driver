@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'hand_mapper_node = rh56_hand_driver.hand_mapper_node_python:main',
+            'hand_mapper_node = rh56_hand_driver.hand_mapper_node:main',
+            'rh56dftp_driver_node = rh56_hand_driver.rh56dftp_driver_node:main',
         ],
     },
 )
