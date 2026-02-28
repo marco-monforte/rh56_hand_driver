@@ -42,6 +42,8 @@ class RH56DFXModbusNode(Node):
         )
 
         time.sleep(0.5)
+        
+        self.open_hand()
 
         # =============================
         # ROS Interfaces
@@ -76,6 +78,26 @@ class RH56DFXModbusNode(Node):
         self.timer = self.create_timer(0.02, self.publish_feedback)
 
         self.get_logger().info("RH56DFX Modbus Node started")
+
+    # ==========================================================
+    # FULLY OPEN HAND
+    # ==========================================================
+    def open_hand(self):
+        """
+        Open the hand completely at startup:
+        - All fingers fully open → 1000
+        - Thumb opposition fully open → 0
+        """
+        self.get_logger().info("Opening hand at startup...")
+
+        open_angles = [1000, 1000, 1000, 1000, 1000, 0]
+
+        try:
+            self.handler.write_angle(open_angles)
+            time.sleep(1.0)  # give time to physically move
+            self.get_logger().info("Hand fully opened.")
+        except Exception as e:
+            self.get_logger().error(f"Failed to open hand: {e}")
 
     # ==========================================================
     # COMMAND CALLBACK (Write Angles)
