@@ -7,7 +7,7 @@ import os
 import yaml
 
 from hand_msgs.msg import HandLandmarks
-from hand_msgs.msg import RH56DFXAngleCommand
+from hand_msgs.msg import RH56DFTPAngleCommand
 
 
 class HandMapperNode(Node):
@@ -20,8 +20,8 @@ class HandMapperNode(Node):
         self.calibration_enabled = self.get_parameter("calibration").value
 
         self.angle_pub = self.create_publisher(
-            RH56DFXAngleCommand,
-            "/rh56dfx/angle_command",
+            RH56DFTPAngleCommand,
+            "/rh56dftp/angle_command",
             10
         )
 
@@ -234,7 +234,7 @@ class HandMapperNode(Node):
         robot_angles = self.apply_deadband(robot_angles)
         robot_angles = np.clip(robot_angles, 20, 980)
 
-        angle_msg = RH56DFXAngleCommand()
+        angle_msg = RH56DFTPAngleCommand()
         angle_msg.header.stamp = self.get_clock().now().to_msg()
         angle_msg.angles = robot_angles.astype(float).tolist()
 
