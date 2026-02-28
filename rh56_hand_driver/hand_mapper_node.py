@@ -1,14 +1,13 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
-from hand_msgs.msg import HandLandmarks
 import numpy as np
 import time
 import os
 import yaml
 
-from unitree_sdk2py.core.channel import ChannelPublisher, ChannelFactoryInitialize
-from inspire_sdkpy import inspire_hand_defaut, inspire_dds
+from hand_msgs.msg import HandLandmarks
+from hand_msgs.msg import RH56DFXAngleCommand
 
 
 class HandMapperNode(Node):
@@ -18,23 +17,13 @@ class HandMapperNode(Node):
 
         # ================= PARAMETERS =================
         self.declare_parameter("calibration", False)
-        self.declare_parameter("dds_domain", 0)
-
         self.calibration_enabled = self.get_parameter("calibration").value
-        dds_domain = self.get_parameter("dds_domain").value
 
-        ChannelFactoryInitialize(dds_domain)
-
-        self.pub = ChannelPublisher(
-            "rt/inspire_hand/ctrl/l",
-            inspire_dds.inspire_hand_ctrl
+        self.angle_pub = self.create_publisher(
+            RH56DFXAngleCommand,
+            "/rh56dfx/angle_command",
+            10
         )
-        self.pub.Init()
-
-        self.cmd = inspire_hand_defaut.get_inspire_hand_ctrl()
-        self.cmd.angle_set = [1000, 1000, 1000, 1000, 1000, 1000]
-        self.cmd.mode = 0b0001
-        self.pub.Write(self.cmd)
 
         self.subscription = self.create_subscription(
             HandLandmarks,
@@ -245,9 +234,11 @@ class HandMapperNode(Node):
         robot_angles = self.apply_deadband(robot_angles)
         robot_angles = np.clip(robot_angles, 20, 980)
 
-        self.cmd.angle_set = robot_angles.astype(int).tolist()
-        self.cmd.mode = 0b0001
-        self.pub.Write(self.cmd)
+        angle_msg = RH56DFXAngleCommand()
+        angle_msg.header.stamp = self.get_clock().now().to_msg()
+        angle_msg.angles = robot_angles.astype(float).tolist()
+
+        self.angle_pub.publish(angle_msg)
 
         # ================= DEBUG =================
         self.debug_counter += 1
