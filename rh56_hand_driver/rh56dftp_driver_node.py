@@ -7,15 +7,16 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 
-from hand_msgs.msg import RH56DFXAngleCommand, RH56DFXFeedback
+from hand_msgs.msg import RH56DFTPAngleCommand, RH56DFTPFeedback
 
 from inspire_sdkpy import inspire_sdk
+from inspire_sdkpy.inspire_dds import inspire_hand_ctrl
 
 
-class RH56DFXModbusNode(Node):
+class RH56DFTPModbusNode(Node):
 
     def __init__(self):
-        super().__init__('rh56dfx_modbus_node')
+        super().__init__('rh56dftp_modbus_node')
 
         # =============================
         # Parameters
@@ -33,7 +34,7 @@ class RH56DFXModbusNode(Node):
         # =============================
         # Init Modbus Handler
         # =============================
-        self.get_logger().info(f"Connecting to RH56DFX at {self.ip} ...")
+        self.get_logger().info(f"Connecting to RH56DFTP at {self.ip} ...")
 
         self.handler = inspire_sdk.ModbusDataHandler(
             ip=self.ip,
@@ -49,15 +50,15 @@ class RH56DFXModbusNode(Node):
         # ROS Interfaces
         # =============================
         self.cmd_sub = self.create_subscription(
-            RH56DFXAngleCommand,
-            "angle_command",
+            RH56DFTPAngleCommand,
+            "/rh56dftp/angle_command",
             self.command_callback,
             10
         )
 
         self.feedback_pub = self.create_publisher(
-            RH56DFXFeedback,
-            "feedback",
+            RH56DFTPFeedback,
+            "/rh56dftp/feedback",
             10
         )
 
@@ -77,7 +78,7 @@ class RH56DFXModbusNode(Node):
         # Publish timer (50 Hz)
         self.timer = self.create_timer(0.02, self.publish_feedback)
 
-        self.get_logger().info("RH56DFX Modbus Node started")
+        self.get_logger().info("RH56DFTP Modbus Node started")
 
     # ==========================================================
     # FULLY OPEN HAND
@@ -93,7 +94,16 @@ class RH56DFXModbusNode(Node):
         open_angles = [1000, 1000, 1000, 1000, 1000, 0]
 
         try:
-            self.handler.write_angle(open_angles)
+            # self.handler.write_angle(open_angles)
+            ctrl_msg = inspire_hand_ctrl(
+                pos_set=[0]*6,
+                angle_set=open_angles,
+                force_set=[0]*6,
+                speed_set=[0]*6,
+                mode=0b0001
+            )
+            self.handler.write_registers_callback(ctrl_msg)
+            
             time.sleep(1.0)  # give time to physically move
             self.get_logger().info("Hand fully opened.")
         except Exception as e:
@@ -102,13 +112,21 @@ class RH56DFXModbusNode(Node):
     # ==========================================================
     # COMMAND CALLBACK (Write Angles)
     # ==========================================================
-    def command_callback(self, msg: RH56DFXAngleCommand):
+    def command_callback(self, msg: RH56DFTPAngleCommand):
 
         angles = np.array(msg.angles)
 
         try:
             # Scrittura registri angoli
-            self.handler.write_angle(angles.astype(int).tolist())
+            # self.handler.write_angle(angles.astype(int).tolist())
+            ctrl_msg = inspire_hand_ctrl(
+                pos_set=[0]*6,
+                angle_set=angles.astype(int).tolist(),
+                force_set=[0]*6,
+                speed_set=[0]*6,
+                mode=0b0001
+            )
+            self.handler.write_registers_callback(ctrl_msg)
         except Exception as e:
             self.get_logger().error(f"Write error: {e}")
 
@@ -151,7 +169,7 @@ class RH56DFXModbusNode(Node):
         if self.latest_data is None:
             return
 
-        feedback = RH56DFXFeedback()
+        feedback = RH56DFTPFeedback()
         feedback.header.stamp = self.get_clock().now().to_msg()
 
         with self.lock:
@@ -173,26 +191,26 @@ class RH56DFXModbusNode(Node):
         # =============================
         touch = data['touch']
 
-        feedback.pinky_tip_touch = touch['pinky_tip_touch'].flatten().tolist()
-        feedback.pinky_top_touch = touch['pinky_top_touch'].flatten().tolist()
-        feedback.pinky_palm_touch = touch['pinky_palm_touch'].flatten().tolist()
+        feedback.pinky_tip_touch = touch['fingerone_tip_touch'].flatten().tolist()
+        feedback.pinky_top_touch = touch['fingerone_top_touch'].flatten().tolist()
+        feedback.pinky_palm_touch = touch['fingerone_palm_touch'].flatten().tolist()
 
-        feedback.ring_tip_touch = touch['ring_tip_touch'].flatten().tolist()
-        feedback.ring_top_touch = touch['ring_top_touch'].flatten().tolist()
-        feedback.ring_palm_touch = touch['ring_palm_touch'].flatten().tolist()
+        feedback.ring_tip_touch = touch['fingertwo_tip_touch'].flatten().tolist()
+        feedback.ring_top_touch = touch['fingertwo_top_touch'].flatten().tolist()
+        feedback.ring_palm_touch = touch['fingertwo_palm_touch'].flatten().tolist()
 
-        feedback.middle_tip_touch = touch['middle_tip_touch'].flatten().tolist()
-        feedback.middle_top_touch = touch['middle_top_touch'].flatten().tolist()
-        feedback.middle_palm_touch = touch['middle_palm_touch'].flatten().tolist()
+        feedback.middle_tip_touch = touch['fingerthree_tip_touch'].flatten().tolist()
+        feedback.middle_top_touch = touch['fingerthree_top_touch'].flatten().tolist()
+        feedback.middle_palm_touch = touch['fingerthree_palm_touch'].flatten().tolist()
 
-        feedback.index_tip_touch = touch['index_tip_touch'].flatten().tolist()
-        feedback.index_top_touch = touch['index_top_touch'].flatten().tolist()
-        feedback.index_palm_touch = touch['index_palm_touch'].flatten().tolist()
+        feedback.index_tip_touch = touch['fingerfour_tip_touch'].flatten().tolist()
+        feedback.index_top_touch = touch['fingerfour_top_touch'].flatten().tolist()
+        feedback.index_palm_touch = touch['fingerfour_palm_touch'].flatten().tolist()
 
-        feedback.thumb_tip_touch = touch['thumb_tip_touch'].flatten().tolist()
-        feedback.thumb_top_touch = touch['thumb_top_touch'].flatten().tolist()
-        feedback.thumb_middle_touch = touch['thumb_middle_touch'].flatten().tolist()
-        feedback.thumb_palm_touch = touch['thumb_palm_touch'].flatten().tolist()
+        feedback.thumb_tip_touch = touch['fingerfive_tip_touch'].flatten().tolist()
+        feedback.thumb_top_touch = touch['fingerfive_top_touch'].flatten().tolist()
+        feedback.thumb_middle_touch = touch['fingerfive_middle_touch'].flatten().tolist()
+        feedback.thumb_palm_touch = touch['fingerfive_palm_touch'].flatten().tolist()
 
         feedback.palm_touch = touch['palm_touch'].flatten().tolist()
 
@@ -212,7 +230,7 @@ class RH56DFXModbusNode(Node):
 # ==========================================================
 def main(args=None):
     rclpy.init(args=args)
-    node = RH56DFXModbusNode()
+    node = RH56DFTPModbusNode()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()
