@@ -1,6 +1,8 @@
 MIGLIORIE GENERICHE:
 - [ ] Associa ai landmark una posizione 3D nello spazio
 - [ ] Blocca controllo su base della corrente
+- [ ] Abilita il controllo di entrambe le mani su thread separati
+- [ ] Converti a C++ seguendo l'esempio nella libreria GitHub
   
 MIGLIORIE DELL'ALGORITMO DI MAPPING
 
