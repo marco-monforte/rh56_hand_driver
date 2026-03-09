@@ -26,16 +26,22 @@ class RH56DFTPModbusNode(Node):
         self.declare_parameter("device_id", 1)
         self.declare_parameter("polling_hz", 200.0)
 
-        # safety parameter
+        # Safety parameters
         self.declare_parameter("current_limit_ma", 1500)
+        self.declare_parameter("contact_current_ma", 650)
+        self.declare_parameter("soft_grasp_enabled", True)
 
         self.ip = self.get_parameter("ip").value
         self.controlled_hand = self.get_parameter("controlled_hand").value
         self.device_id = self.get_parameter("device_id").value
         self.polling_hz = self.get_parameter("polling_hz").value
-        self.current_limit_ma = self.get_parameter("current_limit_ma").value
 
-        self.unlock_current_ma = 600
+        self.current_limit_ma = self.get_parameter("current_limit_ma").value
+        self.contact_current_ma = self.get_parameter("contact_current_ma").value
+        self.soft_grasp_enabled = self.get_parameter("soft_grasp_enabled").value
+
+        # unlock logic
+        self.unlock_current_ma = 500
         self.unlock_time = 1.0
 
         # =============================
@@ -54,7 +60,6 @@ class RH56DFTPModbusNode(Node):
         # Internal state
         # =============================
         self.lock = threading.Lock()
-
         self.latest_data = None
         self.running = True
 
@@ -62,8 +67,9 @@ class RH56DFTPModbusNode(Node):
         self.desired_angles = [1000, 1000, 1000, 1000, 1000, 0]
         self.safe_angles = self.desired_angles.copy()
 
-        # safety
+        # safety states
         self.finger_locked = [False]*6
+        self.contact_locked = [False]*6
         self.unlock_timer = [None]*6
 
         # =============================
@@ -106,7 +112,7 @@ class RH56DFTPModbusNode(Node):
         self.control_thread = threading.Thread(target=self.control_loop)
         self.control_thread.start()
 
-        # feedback publisher timer
+        # feedback publisher
         self.timer = self.create_timer(0.02, self.publish_feedback)
 
         self.get_logger().info("RH56DFTP Modbus Node started")
@@ -143,13 +149,18 @@ class RH56DFTPModbusNode(Node):
     # ==========================================================
     def command_callback(self, msg):
 
+        requested = np.array(msg.angles).astype(int)
+
         with self.lock:
 
-            requested = np.array(msg.angles).astype(int)
-
             for i in range(6):
+
                 if not self.finger_locked[i]:
                     self.desired_angles[i] = int(requested[i])
+
+                # unlock contact if opening
+                if requested[i] > self.safe_angles[i]:
+                    self.contact_locked[i] = False
 
     # ==========================================================
     # READ LOOP
@@ -166,7 +177,6 @@ class RH56DFTPModbusNode(Node):
 
                 with self.lock:
                     self.latest_data = data_dict
-
                     self.check_current_safety(data_dict)
 
             except Exception as e:
@@ -188,7 +198,9 @@ class RH56DFTPModbusNode(Node):
 
             current = currents[i]
 
-            # trigger lock
+            # -----------------------------------------
+            # OVERCURRENT PROTECTION
+            # -----------------------------------------
             if current > self.current_limit_ma and not self.finger_locked[i]:
 
                 self.finger_locked[i] = True
@@ -199,7 +211,26 @@ class RH56DFTPModbusNode(Node):
                     f"{current} mA -> locking at {angles[i]}"
                 )
 
-            # check unlock condition
+            # -----------------------------------------
+            # CONTACT DETECTION
+            # -----------------------------------------
+            if self.soft_grasp_enabled:
+
+                if (current > self.contact_current_ma and
+                        not self.contact_locked[i] and
+                        not self.finger_locked[i]):
+
+                    self.contact_locked[i] = True
+                    self.safe_angles[i] = angles[i]
+
+                    self.get_logger().info(
+                        f"[CONTACT] {self.finger_names[i]} "
+                        f"{current} mA -> grasp contact"
+                    )
+
+            # -----------------------------------------
+            # AUTO UNLOCK LOGIC
+            # -----------------------------------------
             if self.finger_locked[i]:
 
                 if current < self.unlock_current_ma:
@@ -235,7 +266,7 @@ class RH56DFTPModbusNode(Node):
 
                     for i in range(6):
 
-                        if not self.finger_locked[i]:
+                        if not self.finger_locked[i] and not self.contact_locked[i]:
                             self.safe_angles[i] = self.desired_angles[i]
 
                     ctrl_msg = inspire_hand_ctrl(
