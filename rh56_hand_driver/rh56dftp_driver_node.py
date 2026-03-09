@@ -22,28 +22,63 @@ class RH56DFTPModbusNode(Node):
         # Parameters
         # =============================
         self.declare_parameter("ip", "192.168.123.210")
-        self.declare_parameter("lr", "l")
+        self.declare_parameter("controlled_hand", "left")
         self.declare_parameter("device_id", 1)
         self.declare_parameter("polling_hz", 200.0)
 
+        # safety parameter
+        self.declare_parameter("current_limit_ma", 1500)
+
         self.ip = self.get_parameter("ip").value
-        self.lr = self.get_parameter("lr").value
+        self.controlled_hand = self.get_parameter("controlled_hand").value
         self.device_id = self.get_parameter("device_id").value
         self.polling_hz = self.get_parameter("polling_hz").value
+        self.current_limit_ma = self.get_parameter("current_limit_ma").value
+
+        self.unlock_current_ma = 600
+        self.unlock_time = 1.0
 
         # =============================
-        # Init Modbus Handler
+        # Finger metadata
+        # =============================
+        self.finger_names = [
+            "pinky",
+            "ring",
+            "middle",
+            "index",
+            "thumb_bend",
+            "thumb_rotate"
+        ]
+
+        # =============================
+        # Internal state
+        # =============================
+        self.lock = threading.Lock()
+
+        self.latest_data = None
+        self.running = True
+
+        # command states
+        self.desired_angles = [1000, 1000, 1000, 1000, 1000, 0]
+        self.safe_angles = self.desired_angles.copy()
+
+        # safety
+        self.finger_locked = [False]*6
+        self.unlock_timer = [None]*6
+
+        # =============================
+        # Init Modbus
         # =============================
         self.get_logger().info(f"Connecting to RH56DFTP at {self.ip} ...")
 
         self.handler = inspire_sdk.ModbusDataHandler(
             ip=self.ip,
-            LR=self.lr,
+            LR=self.controlled_hand,
             device_id=self.device_id
         )
 
         time.sleep(0.5)
-        
+
         self.open_hand()
 
         # =============================
@@ -63,101 +98,158 @@ class RH56DFTPModbusNode(Node):
         )
 
         # =============================
-        # Internal state
+        # Threads
         # =============================
-        self.lock = threading.Lock()
-        self.latest_data = None
-        self.running = True
+        self.read_thread = threading.Thread(target=self.read_loop)
+        self.read_thread.start()
 
-        # =============================
-        # Start polling thread
-        # =============================
-        self.thread = threading.Thread(target=self.read_loop)
-        self.thread.start()
+        self.control_thread = threading.Thread(target=self.control_loop)
+        self.control_thread.start()
 
-        # Publish timer (50 Hz)
+        # feedback publisher timer
         self.timer = self.create_timer(0.02, self.publish_feedback)
 
         self.get_logger().info("RH56DFTP Modbus Node started")
 
     # ==========================================================
-    # FULLY OPEN HAND
+    # OPEN HAND
     # ==========================================================
     def open_hand(self):
-        """
-        Open the hand completely at startup:
-        - All fingers fully open → 1000
-        - Thumb opposition fully open → 0
-        """
+
         self.get_logger().info("Opening hand at startup...")
 
         open_angles = [1000, 1000, 1000, 1000, 1000, 0]
 
+        self.desired_angles = open_angles.copy()
+        self.safe_angles = open_angles.copy()
+
+        ctrl_msg = inspire_hand_ctrl(
+            pos_set=[0]*6,
+            angle_set=open_angles,
+            force_set=[0]*6,
+            speed_set=[0]*6,
+            mode=0b0001
+        )
+
         try:
-            # self.handler.write_angle(open_angles)
-            ctrl_msg = inspire_hand_ctrl(
-                pos_set=[0]*6,
-                angle_set=open_angles,
-                force_set=[0]*6,
-                speed_set=[0]*6,
-                mode=0b0001
-            )
             self.handler.write_registers_callback(ctrl_msg)
-            
-            time.sleep(1.0)  # give time to physically move
+            time.sleep(1.0)
             self.get_logger().info("Hand fully opened.")
         except Exception as e:
             self.get_logger().error(f"Failed to open hand: {e}")
 
     # ==========================================================
-    # COMMAND CALLBACK (Write Angles)
+    # COMMAND CALLBACK
     # ==========================================================
-    def command_callback(self, msg: RH56DFTPAngleCommand):
+    def command_callback(self, msg):
 
-        angles = np.array(msg.angles)
+        with self.lock:
 
-        try:
-            # Scrittura registri angoli
-            # self.handler.write_angle(angles.astype(int).tolist())
-            ctrl_msg = inspire_hand_ctrl(
-                pos_set=[0]*6,
-                angle_set=angles.astype(int).tolist(),
-                force_set=[0]*6,
-                speed_set=[0]*6,
-                mode=0b0001
-            )
-            self.handler.write_registers_callback(ctrl_msg)
-        except Exception as e:
-            self.get_logger().error(f"Write error: {e}")
+            requested = np.array(msg.angles).astype(int)
+
+            for i in range(6):
+                if not self.finger_locked[i]:
+                    self.desired_angles[i] = int(requested[i])
 
     # ==========================================================
-    # READ LOOP THREAD
+    # READ LOOP
     # ==========================================================
     def read_loop(self):
 
         period = 1.0 / self.polling_hz
 
-        call_count = 0
-        start_time = time.perf_counter()
-
         while self.running:
 
             try:
+
                 data_dict = self.handler.read()
 
                 with self.lock:
                     self.latest_data = data_dict
 
-                call_count += 1
-
-                # Debug frequency
-                if call_count % 200 == 0:
-                    elapsed = time.perf_counter() - start_time
-                    freq = call_count / elapsed
-                    self.get_logger().info(f"Polling freq: {freq:.1f} Hz")
+                    self.check_current_safety(data_dict)
 
             except Exception as e:
                 self.get_logger().error(f"Read error: {e}")
+
+            time.sleep(period)
+
+    # ==========================================================
+    # SAFETY CHECK
+    # ==========================================================
+    def check_current_safety(self, data):
+
+        currents = data['states']['CURRENT']
+        angles = data['states']['ANGLE_ACT']
+
+        now = time.time()
+
+        for i in range(6):
+
+            current = currents[i]
+
+            # trigger lock
+            if current > self.current_limit_ma and not self.finger_locked[i]:
+
+                self.finger_locked[i] = True
+                self.safe_angles[i] = angles[i]
+
+                self.get_logger().warn(
+                    f"[OVERCURRENT] {self.finger_names[i]} "
+                    f"{current} mA -> locking at {angles[i]}"
+                )
+
+            # check unlock condition
+            if self.finger_locked[i]:
+
+                if current < self.unlock_current_ma:
+
+                    if self.unlock_timer[i] is None:
+                        self.unlock_timer[i] = now
+
+                    if now - self.unlock_timer[i] > self.unlock_time:
+
+                        self.finger_locked[i] = False
+                        self.unlock_timer[i] = None
+
+                        self.get_logger().info(
+                            f"[UNLOCK] {self.finger_names[i]} current normal"
+                        )
+
+                else:
+                    self.unlock_timer[i] = None
+
+    # ==========================================================
+    # CONTROL LOOP (ONLY WRITER)
+    # ==========================================================
+    def control_loop(self):
+
+        rate = 200.0
+        period = 1.0 / rate
+
+        while self.running:
+
+            try:
+
+                with self.lock:
+
+                    for i in range(6):
+
+                        if not self.finger_locked[i]:
+                            self.safe_angles[i] = self.desired_angles[i]
+
+                    ctrl_msg = inspire_hand_ctrl(
+                        pos_set=[0]*6,
+                        angle_set=self.safe_angles,
+                        force_set=[0]*6,
+                        speed_set=[0]*6,
+                        mode=0b0001
+                    )
+
+                self.handler.write_registers_callback(ctrl_msg)
+
+            except Exception as e:
+                self.get_logger().error(f"Control write error: {e}")
 
             time.sleep(period)
 
@@ -175,9 +267,6 @@ class RH56DFTPModbusNode(Node):
         with self.lock:
             data = self.latest_data
 
-        # =============================
-        # Joint State
-        # =============================
         feedback.position = data['states']['POS_ACT']
         feedback.angle = data['states']['ANGLE_ACT']
         feedback.force = data['states']['FORCE_ACT']
@@ -186,9 +275,6 @@ class RH56DFTPModbusNode(Node):
         feedback.status = data['states']['STATUS']
         feedback.temperature = data['states']['TEMP']
 
-        # =============================
-        # Touch Mapping
-        # =============================
         touch = data['touch']
 
         feedback.pinky_tip_touch = touch['fingerone_tip_touch'].flatten().tolist()
@@ -217,11 +303,15 @@ class RH56DFTPModbusNode(Node):
         self.feedback_pub.publish(feedback)
 
     # ==========================================================
-    # Shutdown
+    # SHUTDOWN
     # ==========================================================
     def destroy_node(self):
+
         self.running = False
-        self.thread.join()
+
+        self.read_thread.join()
+        self.control_thread.join()
+
         super().destroy_node()
 
 
@@ -229,10 +319,15 @@ class RH56DFTPModbusNode(Node):
 # MAIN
 # ==========================================================
 def main(args=None):
+
     rclpy.init(args=args)
+
     node = RH56DFTPModbusNode()
+
     rclpy.spin(node)
+
     node.destroy_node()
+
     rclpy.shutdown()
 
 
