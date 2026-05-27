@@ -9,60 +9,41 @@ endif()
 # Dependencies
 # --------------------------------------------------
 
-set(CMAKE_PREFIX_PATH
-  ${CMAKE_PREFIX_PATH}
-  /opt/unitree_robotics
-)
-
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(hand_msgs REQUIRED)
-find_package(unitree_sdk2 REQUIRED)
-find_package(CycloneDDS REQUIRED)
-
-# --------------------------------------------------
-# C++ Node
-# --------------------------------------------------
-
-set(HAND_IDL_DIR
-  ${CMAKE_CURRENT_SOURCE_DIR}/inspire_hand_ws/inspire_hand_sdk/hand_idl
-)
 
 add_executable(rh56dftp_driver_node
   src/rh56dftp_driver_node.cpp
-
-  inspire_hand_ws/inspire_hand_sdk/hand_idl/inspire_hand_ctrl.cpp
-  inspire_hand_ws/inspire_hand_sdk/hand_idl/inspire_hand_state.cpp
-  inspire_hand_ws/inspire_hand_sdk/hand_idl/inspire_hand_touch.cpp
-
 )
+
+target_compile_features(rh56dftp_driver_node PUBLIC cxx_std_17)
 
 ament_target_dependencies(rh56dftp_driver_node
   rclcpp
   hand_msgs
 )
 
-target_include_directories(rh56dftp_driver_node PUBLIC
-  ${HAND_IDL_DIR}
+add_executable(hand_mapper_node
+  src/hand_mapper_node.cpp
 )
 
-target_link_libraries(rh56dftp_driver_node
-  unitree_sdk2
-  CycloneDDS::ddsc
+target_compile_features(hand_mapper_node PUBLIC cxx_std_17)
+
+ament_target_dependencies(hand_mapper_node
+  rclcpp
+  hand_msgs
 )
 
 install(TARGETS
   rh56dftp_driver_node
+  hand_mapper_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# --------------------------------------------------
-# Python Node
-# --------------------------------------------------
-
-install(PROGRAMS
-  src/hand_mapper_node.py
-  DESTINATION lib/${PROJECT_NAME}
+install(DIRECTORY
+  launch
+  DESTINATION share/${PROJECT_NAME}
 )
 
 # --------------------------------------------------
